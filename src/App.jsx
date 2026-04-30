@@ -124,6 +124,7 @@ export default function App() {
   };
 
   const deleteExpense = async (id) => {
+    if (!window.confirm("Excluir este lançamento?")) return;
     const { error } = await sb.from("expenses").delete().eq("id", id);
     if (error) showToast("Erro ao remover.", "err");
     else { setExpenses(ex => ex.filter(x => x.id !== id)); showToast("Removido."); }
