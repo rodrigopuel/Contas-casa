@@ -1,10 +1,21 @@
 import { useState, useEffect, useRef } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { initializeApp } from "firebase/app";
+import {
+  getFirestore, collection, addDoc, deleteDoc, doc,
+  onSnapshot, query, orderBy, getDocs, writeBatch, serverTimestamp
+} from "firebase/firestore";
 
-// ─── Supabase ─────────────────────────────────────────────────────────
-const SUPA_URL = "https://jopwgmfnshsxfmvmmimc.supabase.co";
-const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvcHdnbWZuc2hzeGZtdm1taW1jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc1MDc1MzksImV4cCI6MjA5MzA4MzUzOX0.dJaS41qLYHsn_bJQRjO8p9jljRklmQdLnevNjHJ3cGE";
-const sb = createClient(SUPA_URL, SUPA_KEY);
+// ─── Firebase ─────────────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyBW1Pif4kBmKe_S_td_AjH7Hu0Zn3BOzOU",
+  authDomain: "contas-casal-8ee6c.firebaseapp.com",
+  projectId: "contas-casal-8ee6c",
+  storageBucket: "contas-casal-8ee6c.firebasestorage.app",
+  messagingSenderId: "438097541746",
+  appId: "1:438097541746:web:0aaa1d6cbb3f884dfd20eb"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
 
 // ─── Categories ───────────────────────────────────────────────────────
 const CATEGORIES = [
@@ -25,7 +36,7 @@ const NAMES = { p1: "Rodrigo", p2: "Tatiana" };
 // ─── Helpers ──────────────────────────────────────────────────────────
 const fmt = (v) => Number(v).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 const fmtShort = (iso) => new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit" });
-const fmtFull  = (iso) => new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
+const fmtFull  = (d) => (d instanceof Date ? d : new Date(d)).toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
 
 const calcBalance = (exps) => {
   let p1owes = 0, p2owes = 0;
@@ -73,22 +84,19 @@ export default function App() {
   const [filterPayer, setFilterPayer] = useState("all");
 
   useEffect(() => {
-    Promise.all([fetchExpenses(), fetchHistory()]).finally(() => setLoading(false));
-    const channel = sb.channel("realtime-expenses")
-      .on("postgres_changes", { event: "*", schema: "public", table: "expenses" }, () => fetchExpenses())
-      .subscribe();
-    return () => sb.removeChannel(channel);
+    const qExp = query(collection(db, "expenses"), orderBy("createdAt", "desc"));
+    const unsubExp = onSnapshot(qExp, (snap) => {
+      setExpenses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    }, () => setLoading(false));
+
+    const qClose = query(collection(db, "closings"), orderBy("closedAt", "desc"));
+    const unsubClose = onSnapshot(qClose, (snap) => {
+      setHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
+    return () => { unsubExp(); unsubClose(); };
   }, []);
-
-  const fetchExpenses = async () => {
-    const { data, error } = await sb.from("expenses").select("*").order("created_at", { ascending: false });
-    if (!error) setExpenses(data || []);
-  };
-
-  const fetchHistory = async () => {
-    const { data, error } = await sb.from("closings").select("*").order("closed_at", { ascending: false });
-    if (!error) setHistory(data || []);
-  };
 
   const showToast = (msg, type = "ok") => {
     setToast({ msg, type });
@@ -112,36 +120,50 @@ export default function App() {
     if (!form.amount || isNaN(parseFloat(form.amount.replace(",", ".")))) return showToast("Informe o valor.", "err");
     if (!form.category) return showToast("Selecione a categoria.", "err");
     setSaving(true);
-    const { error } = await sb.from("expenses").insert({
-      payer: form.payer, description: form.description.trim(), category: form.category,
-      amount: parseFloat(form.amount.replace(",", ".")), beneficiary: form.beneficiary,
-      date: form.date, photo: form.photo || null, photo_name: form.photoName || null,
-    });
+    try {
+      await addDoc(collection(db, "expenses"), {
+        payer:       form.payer,
+        description: form.description.trim(),
+        category:    form.category,
+        amount:      parseFloat(form.amount.replace(",", ".")),
+        beneficiary: form.beneficiary,
+        date:        form.date,
+        photo:       form.photo || null,
+        photoName:   form.photoName || null,
+        createdAt:   serverTimestamp(),
+      });
+      showToast("Lançamento salvo! ✅");
+      setView("home");
+    } catch { showToast("Erro ao salvar. Tente novamente.", "err"); }
     setSaving(false);
-    if (error) return showToast("Erro ao salvar. Tente novamente.", "err");
-    showToast("Lançamento salvo! ✅");
-    setView("home");
   };
 
   const deleteExpense = async (id) => {
     if (!window.confirm("Excluir este lançamento?")) return;
-    const { error } = await sb.from("expenses").delete().eq("id", id);
-    if (error) showToast("Erro ao remover.", "err");
-    else { setExpenses(ex => ex.filter(x => x.id !== id)); showToast("Removido."); }
+    try {
+      await deleteDoc(doc(db, "expenses", id));
+      showToast("Removido.");
+    } catch { showToast("Erro ao remover.", "err"); }
   };
 
   const doClose = async () => {
     if (expenses.length === 0) { showToast("Nenhum lançamento para fechar.", "err"); setView("home"); return; }
     setSaving(true);
-    const { error: errClose } = await sb.from("closings").insert({ expenses, balance: calcBalance(expenses), names: NAMES });
-    if (errClose) { setSaving(false); return showToast("Erro ao fechar. Tente novamente.", "err"); }
-    const { error: errDel } = await sb.from("expenses").delete().neq("id", 0);
+    try {
+      await addDoc(collection(db, "closings"), {
+        expenses:  expenses,
+        balance:   calcBalance(expenses),
+        names:     NAMES,
+        closedAt:  serverTimestamp(),
+      });
+      const snap = await getDocs(collection(db, "expenses"));
+      const batch = writeBatch(db);
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+      setView("home");
+      showToast("Contas fechadas e salvas! 🎉");
+    } catch { showToast("Erro ao fechar. Tente novamente.", "err"); }
     setSaving(false);
-    if (errDel) return showToast("Erro ao limpar lançamentos.", "err");
-    setExpenses([]);
-    await fetchHistory();
-    setView("home");
-    showToast("Contas fechadas e salvas! 🎉");
   };
 
   const bal = calcBalance(expenses);
@@ -173,7 +195,7 @@ export default function App() {
       )}
 
       {view === "history_detail" && selHist && (
-        <Screen title={`Fechamento ${fmtShort(selHist.closed_at)}`} onBack={() => setView("history")}>
+        <Screen title={`Fechamento ${selHist.closedAt?.toDate ? fmtShort(selHist.closedAt.toDate().toISOString()) : ""}`} onBack={() => setView("history")}>
           <HistoryDetail snap={selHist} />
         </Screen>
       )}
@@ -182,10 +204,11 @@ export default function App() {
         <Screen title="Histórico" onBack={() => setView("home")}>
           {history.length === 0 ? <Empty text="Nenhum fechamento ainda." /> : history.map(snap => {
             const b = snap.balance; const n = snap.names || NAMES;
+            const date = snap.closedAt?.toDate ? snap.closedAt.toDate() : new Date();
             return (
               <div key={snap.id} style={S.histCard} onClick={() => { setSelHist(snap); setView("history_detail"); }}>
                 <div>
-                  <div style={S.histDate}>{fmtFull(snap.closed_at)}</div>
+                  <div style={S.histDate}>{fmtFull(date)}</div>
                   <div style={S.histCount}>{snap.expenses?.length || 0} lançamentos</div>
                 </div>
                 <div style={{ textAlign: "right" }}>
@@ -333,7 +356,6 @@ export default function App() {
 }
 
 // ─── Components ───────────────────────────────────────────────────────
-
 function Screen({ title, onBack, children }) {
   return (
     <div style={S.screenWrap}>
